@@ -75,7 +75,7 @@ async def test_fixed_sides_cannot_be_overridden_by_model_output():
 
 
 async def test_empty_speech_output_fails_the_stage_not_silently_truncated():
-    provider = FakeProvider(speeches=["", "", "con opener"])
+    provider = FakeProvider(speeches=["", "", ""])
     with pytest.raises(OrchestratorError) as exc_info:
         await run_debate(topic=TOPIC, provider=provider)
     assert exc_info.value.stage == "speech_turn_1"

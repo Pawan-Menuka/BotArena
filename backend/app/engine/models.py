@@ -1,4 +1,4 @@
-"""Core domain types for a single debate. No persistence here — Phase 2 adds that."""
+"""Core domain types for a single debate."""
 
 from __future__ import annotations
 
@@ -65,12 +65,11 @@ class Speech:
     agent: Agent
     side: Side
     content: str
+    saved_id: str | None = None
 
     @property
     def message_id(self) -> str:
-        # Stable id within one in-memory debate run. Phase 2 replaces this with a real
-        # DB-generated id but keeps the same "stable id referenceable by the judge" contract.
-        return f"m{self.turn_order}"
+        return self.saved_id or f"m{self.turn_order}"
 
 
 @dataclass(frozen=True)

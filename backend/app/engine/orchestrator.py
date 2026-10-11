@@ -1,95 +1,68 @@
-"""Runs one fixed six-turn debate plus judging against a Provider.
-
-This is Phase 1 scope only: pure in-memory sequencing and validation. Checkpointing,
-persistence, resume, the task registry, and the full multi-call retry/reservation budget
-are Phase 2/3 (blueprint.md §5, §13) and deliberately not here yet.
-"""
-
 from __future__ import annotations
 
-from app.engine.models import TURN_ORDER, ROUND_NUMBER, DebateResult, Judgment, Speech, Topic
+from uuid import uuid4
+
+from app.engine.models import TURN_ORDER, ROUND_NUMBER, DebateResult, Speech, Topic
 from app.engine.prompts import build_judge_prompt, build_speech_prompt
-from app.engine.provider import Provider, ProviderError
+from app.engine.provider import Provider
 from app.engine.judge import score_judgment
-from app.engine.validation import (
-    JUDGE_JSON_SCHEMA,
-    ValidationFailure,
-    validate_judgment,
-    validate_speech,
-)
+from app.engine.retry import OrchestratorError, RetryPolicy
+from app.engine.validation import JUDGE_JSON_SCHEMA, validate_judgment, validate_speech
 
 SPEECH_MAX_OUTPUT_TOKENS = 512
 JUDGMENT_MAX_OUTPUT_TOKENS = 2048
-MAX_ATTEMPTS_PER_STAGE = 2  # one corrective retry; full stage budget is Phase 2/3 scope
 
 
-class OrchestratorError(Exception):
-    """Raised when a stage exhausts its attempts without producing valid output."""
-
-    def __init__(self, stage: str, reason: str) -> None:
-        self.stage = stage
-        self.reason = reason
-        super().__init__(f"{stage}: {reason}")
-
-
-async def run_debate(*, topic: Topic, provider: Provider) -> DebateResult:
-    speeches: list[Speech] = []
-
-    for turn_order, (round_name, agent, side) in enumerate(TURN_ORDER, start=1):
-        round_number = ROUND_NUMBER[round_name]
-        system, user = build_speech_prompt(
-            topic=topic,
-            agent=agent,
-            side=side,
-            round_name=round_name,
-            round_number=round_number,
-            prior=speeches,
-        )
-
-        last_error: str | None = None
-        for _attempt in range(MAX_ATTEMPTS_PER_STAGE):
-            try:
-                response = await provider.complete(
-                    system=system, user=user, max_output_tokens=SPEECH_MAX_OUTPUT_TOKENS
-                )
-                content = validate_speech(response.text)
-                break
-            except (ProviderError, ValidationFailure) as exc:
-                last_error = str(exc)
-        else:
-            raise OrchestratorError(f"speech_turn_{turn_order}", last_error or "unknown failure")
-
-        speeches.append(
-            Speech(
-                turn_order=turn_order,
-                round=round_name,
-                round_number=round_number,
-                agent=agent,
-                side=side,
-                content=content,
-            )
-        )
-
-    judgment = await _run_judging(topic=topic, speeches=speeches, provider=provider)
-    return DebateResult(topic=topic, speeches=speeches, judgment=judgment)
+def validate_checkpoint(speeches: list[Speech]) -> None:
+    if len(speeches) > 6 or len({s.message_id for s in speeches}) != len(speeches):
+        raise OrchestratorError("checkpoint", "Saved checkpoint is inconsistent", code="checkpoint_invalid")
+    for position, speech in enumerate(speeches, start=1):
+        round_name, agent, side = TURN_ORDER[position - 1]
+        if (speech.turn_order, speech.round, speech.round_number, speech.agent, speech.side) != (
+            position, round_name, ROUND_NUMBER[round_name], agent, side
+        ):
+            raise OrchestratorError("checkpoint", "Saved checkpoint is inconsistent", code="checkpoint_invalid")
 
 
-async def _run_judging(*, topic: Topic, speeches: list[Speech], provider: Provider) -> Judgment:
+async def run_debate(*, topic: Topic, provider: Provider, prior: list[Speech] | None = None,
+                     persistence=None, retry_policy: RetryPolicy | None = None) -> DebateResult:
+    speeches = list(prior or [])
+    validate_checkpoint(speeches)
+    policy = retry_policy or RetryPolicy()
+    calls = 0
+
+    async def before_call(stage, retrying):
+        nonlocal calls
+        if persistence is not None:
+            await persistence.before_call(stage, retrying)
+        elif calls >= 30:
+            raise OrchestratorError(stage, "Debate call allowance exhausted", code="debate_call_limit")
+        calls += 1
+
+    for turn_order in range(len(speeches) + 1, 7):
+        round_name, agent, side = TURN_ORDER[turn_order - 1]
+        system, user = build_speech_prompt(topic=topic, agent=agent, side=side, round_name=round_name,
+                                         round_number=ROUND_NUMBER[round_name], prior=speeches)
+
+        async def dispatch(correction):
+            return await provider.complete(system=system, user=user + correction, max_output_tokens=SPEECH_MAX_OUTPUT_TOKENS)
+
+        content = await policy.run(f"speech_turn_{turn_order}", dispatch, validate_speech, before_call)
+        speech = Speech(turn_order=turn_order, round=round_name, round_number=ROUND_NUMBER[round_name],
+                        agent=agent, side=side, content=content,
+                        saved_id=str(uuid4()) if persistence is not None else None)
+        if persistence is not None:
+            await persistence.commit_speech(speech)
+        speeches.append(speech)
+
     system, user = build_judge_prompt(topic=topic, speeches=speeches)
-    known_ids = {s.message_id for s in speeches}
 
-    last_error: str | None = None
-    for _attempt in range(MAX_ATTEMPTS_PER_STAGE):
-        try:
-            response = await provider.complete(
-                system=system,
-                user=user,
-                max_output_tokens=JUDGMENT_MAX_OUTPUT_TOKENS,
-                json_schema=JUDGE_JSON_SCHEMA,
-            )
-            parsed = validate_judgment(response.text, known_message_ids=known_ids)
-            return score_judgment(parsed)
-        except (ProviderError, ValidationFailure) as exc:
-            last_error = str(exc)
+    async def dispatch_judge(correction):
+        return await provider.complete(system=system, user=user + correction,
+                                       max_output_tokens=JUDGMENT_MAX_OUTPUT_TOKENS, json_schema=JUDGE_JSON_SCHEMA)
 
-    raise OrchestratorError("judgment", last_error or "unknown failure")
+    judgment = await policy.run("judgment", dispatch_judge,
+                                lambda raw: score_judgment(validate_judgment(raw, known_message_ids={s.message_id for s in speeches})), before_call)
+    if persistence is not None:
+        await persistence.commit_judgment(judgment)
+    return DebateResult(topic=topic, speeches=speeches, judgment=judgment)

@@ -19,6 +19,11 @@ REASONING_TOKEN_HEADROOM = 1500
 class ProviderError(Exception):
     """Raised when the provider fails to produce usable output."""
 
+    def __init__(self, message: str, *, retryable: bool = True, retry_after: float | None = None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after = retry_after
+
 
 @dataclass(frozen=True)
 class ProviderResponse:
@@ -48,7 +53,7 @@ class FakeProvider:
         judgment: dict | None = None,
     ) -> None:
         self._speeches = list(speeches) if speeches is not None else list(_DEFAULT_SPEECHES)
-        self._judgment = judgment if judgment is not None else dict(_DEFAULT_JUDGMENT)
+        self._judgment = judgment
         self._speech_calls = 0
         self.calls: list[tuple[str, str]] = []
 
@@ -57,7 +62,13 @@ class FakeProvider:
     ) -> ProviderResponse:
         self.calls.append((system, user))
         if "JSON object" in system:  # judge call — see prompts.JUDGE_SCHEMA_DESCRIPTION
-            return ProviderResponse(text=json.dumps(self._judgment))
+            judgment = self._judgment
+            if judgment is None:
+                import re
+
+                judgment = dict(_DEFAULT_JUDGMENT)
+                judgment["referenced_message_ids"] = re.findall(r"^\[([^\]]+)\] Side [AB] ", user, re.MULTILINE)
+            return ProviderResponse(text=json.dumps(judgment))
         if self._speech_calls >= len(self._speeches):
             raise ProviderError("FakeProvider ran out of scripted speeches")
         text = self._speeches[self._speech_calls]
@@ -110,9 +121,13 @@ class GroqProvider:
             raise ProviderError(
                 "GROQ_MODEL is not set. Check Groq's current model list at "
                 "https://console.groq.com/docs/models and pick one that supports the "
-                "context length this app needs (see blueprint.md §7), then set it."
+                "context length this app needs (see blueprint.md §7), then set it.",
+                retryable=False,
             )
-        self._client = AsyncGroq(api_key=api_key or os.environ.get("GROQ_API_KEY"))
+        key = api_key or os.environ.get("GROQ_API_KEY")
+        if not key:
+            raise ProviderError("GROQ_API_KEY is not set", retryable=False)
+        self._client = AsyncGroq(api_key=key, max_retries=0, timeout=35)
 
     async def complete(
         self, *, system: str, user: str, max_output_tokens: int, json_schema: dict | None = None
@@ -136,8 +151,17 @@ class GroqProvider:
 
         try:
             completion = await self._client.chat.completions.create(**kwargs)
-        except Exception as exc:  # pragma: no cover - network path, not unit tested
-            raise ProviderError(f"Groq request failed: {exc}") from exc
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            response = getattr(exc, "response", None)
+            headers = getattr(response, "headers", {})
+            from app.engine.retry import parse_retry_after
+
+            raise ProviderError(
+                "Provider request failed",
+                retryable=status is None or status in {408, 429} or status >= 500,
+                retry_after=parse_retry_after(headers.get("retry-after")) if status == 429 else None,
+            ) from exc
 
         choice = completion.choices[0]
         if choice.finish_reason == "length":

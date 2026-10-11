@@ -16,6 +16,10 @@ frontend/dist/
 # SQLite data (from Phase 2 onward)
 backend/*.db
 backend/data/*.db
+backend/data/*.db-wal
+backend/data/*.db-shm
+backend/*.db-wal
+backend/*.db-shm
 backend/backups/
 
 # OS
