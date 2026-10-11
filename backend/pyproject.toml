@@ -1,0 +1,24 @@
+[project]
+name = "botarena-backend"
+version = "0.1.0"
+description = "BotArena debate engine and API"
+requires-python = ">=3.12"
+dependencies = [
+    "groq>=1.7.0",
+    "pydantic>=2.14.0",
+    "python-dotenv>=1.2.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]

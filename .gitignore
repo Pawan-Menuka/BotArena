@@ -1,0 +1,23 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Env / secrets
+.env
+backend/.env
+
+# Node (frontend, from Phase 4 onward)
+frontend/node_modules/
+frontend/dist/
+
+# SQLite data (from Phase 2 onward)
+backend/*.db
+backend/data/*.db
+backend/backups/
+
+# OS
+.DS_Store
+Thumbs.db
