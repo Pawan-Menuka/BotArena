@@ -26,6 +26,7 @@ def sdk(monkeypatch):
         return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
 
     monkeypatch.setattr(groq, "AsyncGroq", client)
+    monkeypatch.setattr("app.engine.provider.authorize_dispatch", lambda *args: None)
     return observed
 
 

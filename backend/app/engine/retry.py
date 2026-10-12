@@ -48,6 +48,7 @@ class RetryPolicy:
     async def run(self, stage: str, dispatch, validate, before_call) -> T:
         deadline = self.clock() + self.stage_timeout
         correction = ""
+        failure_code = "provider_failed"
         for attempt in range(3):
             remaining = deadline - self.clock()
             if remaining <= 0:
@@ -61,10 +62,12 @@ class RetryPolicy:
                     response = await dispatch(correction)
                 return validate(response.text)
             except (ProviderError, ValidationFailure, TimeoutError) as exc:
+                failure_code = exc.code if isinstance(exc, ValidationFailure) else "provider_failed"
                 if isinstance(exc, ProviderError) and not exc.retryable:
                     raise OrchestratorError(stage, "Provider configuration or authentication failed", code="provider_configuration") from exc
                 if isinstance(exc, ValidationFailure):
-                    correction = "\nYour previous output failed validation. Return a complete response satisfying the specified format, score bounds, message references and length rules."
+                    correction = ("\nYour previous output was rejected by the profanity filter. Rewrite without profanity while preserving the requested format, argument, score bounds, references and length rules."
+                                  if exc.code == "content_flagged" else "\nYour previous output failed validation. Return a complete response satisfying the specified format, score bounds, message references and length rules.")
                 if attempt == 2:
                     break
                 delay = (1, 3)[attempt] + self.jitter() * 0.25
@@ -73,4 +76,4 @@ class RetryPolicy:
                 if delay >= deadline - self.clock():
                     break
                 await self.sleep(delay)
-        raise OrchestratorError(stage, "Stage could not produce valid output within its retry budget")
+        raise OrchestratorError(stage, "Stage could not produce valid output within its retry budget", code=failure_code)

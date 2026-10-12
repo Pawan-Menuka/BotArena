@@ -45,6 +45,9 @@ async def run_debate(*, topic: Topic, provider: Provider, prior: list[Speech] | 
                                          round_number=ROUND_NUMBER[round_name], prior=speeches)
 
         async def dispatch(correction):
+            if persistence is not None:
+                return await persistence.dispatch(provider, f"speech_turn_{turn_order}", system=system,
+                    user=user + correction, max_output_tokens=SPEECH_MAX_OUTPUT_TOKENS, json_schema=None)
             return await provider.complete(system=system, user=user + correction, max_output_tokens=SPEECH_MAX_OUTPUT_TOKENS)
 
         content = await policy.run(f"speech_turn_{turn_order}", dispatch, validate_speech, before_call)
@@ -58,6 +61,9 @@ async def run_debate(*, topic: Topic, provider: Provider, prior: list[Speech] | 
     system, user = build_judge_prompt(topic=topic, speeches=speeches)
 
     async def dispatch_judge(correction):
+        if persistence is not None:
+            return await persistence.dispatch(provider, "judgment", system=system, user=user + correction,
+                                              max_output_tokens=JUDGMENT_MAX_OUTPUT_TOKENS, json_schema=JUDGE_JSON_SCHEMA)
         return await provider.complete(system=system, user=user + correction,
                                        max_output_tokens=JUDGMENT_MAX_OUTPUT_TOKENS, json_schema=JUDGE_JSON_SCHEMA)
 

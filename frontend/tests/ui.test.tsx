@@ -94,6 +94,12 @@ it('history is labeled as shared and never executes work', async () => {
   expect(run).not.toHaveBeenCalled()
 })
 
+it('explains the limits of the profanity filter in the lobby', async () => {
+  vi.spyOn(api, 'topics').mockResolvedValue({ topics: [] })
+  render(<MemoryRouter><App /></MemoryRouter>)
+  expect(await screen.findByText('Outputs pass through a basic profanity filter. It can miss harmful content and flag legitimate wording.')).toBeInTheDocument()
+})
+
 it('contains a render failure and offers Reload', async () => {
   vi.spyOn(console, 'error').mockImplementation(() => {})
   function Broken(): never { throw new Error('broken') }

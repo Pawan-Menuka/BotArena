@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.db.models import Debate, ExecutionAttempt, utcnow
+from app.db.models import Debate, ExecutionAttempt, ProviderCallReservation, utcnow
 from app.db.repo import DebateRepository
 from app.engine.orchestrator import run_debate
 from app.engine.retry import OrchestratorError
@@ -34,13 +34,18 @@ async def reconcile(sessions, live_run_ids: set[str]) -> None:
         await session.execute(update(ExecutionAttempt).where(
             ExecutionAttempt.status == "active", ExecutionAttempt.run_id.not_in(owned)
         ).values(status="interrupted", finished_at=utcnow(), failed_stage="interruption"))
+        active_attempts = select(ExecutionAttempt.run_id).where(ExecutionAttempt.status == "active")
+        await session.execute(update(ProviderCallReservation).where(
+            ProviderCallReservation.run_id.not_in(active_attempts),
+            ProviderCallReservation.dispatch_state.in_(["reserved", "dispatched"])).values(dispatch_state="abandoned"))
 
 
 class ExecutionManager:
     def __init__(self, sessions, provider_factory, model_id: str, *, retry_policy=None,
                  attempt_timeout: float = 900, shutdown_grace: float = 10, supervisor_interval: float = 5, settings=None):
         self.sessions = sessions
-        self.repo = DebateRepository(sessions)
+        self.lock = asyncio.Lock()
+        self.repo = DebateRepository(sessions, settings=settings, dispatch_lock=self.lock)
         self.provider_factory = provider_factory
         self.model_id = model_id
         self.retry_policy = retry_policy
@@ -49,7 +54,6 @@ class ExecutionManager:
         self.supervisor_interval = supervisor_interval
         self.settings = settings
         self.tasks: dict[str, asyncio.Task] = {}
-        self.lock = asyncio.Lock()
         self.admitting = True
         self.supervisor: asyncio.Task | None = None
 
@@ -63,6 +67,10 @@ class ExecutionManager:
             shared = self.settings is not None and self.settings.deployment_mode == "shared"
             if shared and identity is None:
                 raise ValueError("Shared admission requires a client identity")
+            try:
+                self.repo.settings.validate_execution_budget(self.model_id)
+            except ValueError:
+                raise OrchestratorError("admission", "Provider usage configuration needs attention", code="usage_configuration") from None
             checkpoints, topic, speeches = await self.repo.begin_attempt(
                 debate_id, model_id=self.model_id, capacity=self.settings.global_concurrency if shared else 2,
                 ip_bucket_hash=identity.bucket_hash if shared else None,
@@ -76,6 +84,46 @@ class ExecutionManager:
         self.tasks.pop(run_id, None)
         if not task.cancelled() and task.exception() is not None:
             logger.error("Debate worker stopped; reconciliation will preserve its checkpoint")
+
+    async def hide(self, debate_id: str, *, reason: str):
+        async with self.lock:
+            run_id = None
+            async with self.sessions.begin() as session:
+                await session.execute(text("BEGIN IMMEDIATE"))
+                debate = await session.get(Debate, debate_id)
+                if debate is None:
+                    raise OrchestratorError("operator", "Battle not found", code="not_found")
+                if not debate.hidden:
+                    debate.hidden = True
+                    debate.hidden_reason = reason
+                    debate.hidden_at = utcnow()
+                    debate.updated_at = debate.hidden_at
+                    debate.revision += 1
+                    if debate.status in {"running", "judging"}:
+                        run_id = debate.active_run_id
+                        turn = debate.active_turn
+                        debate.status = "failed"
+                        debate.active_run_id = None
+                        debate.activity = None
+                        debate.active_turn = None
+                        debate.active_speaker = None
+                        debate.error_code = "operator_hidden"
+                        debate.error_message = "Execution was stopped by the operator."
+                        debate.failed_stage = "operator"
+                        debate.failed_turn = turn
+                        await session.execute(update(ExecutionAttempt).where(
+                            ExecutionAttempt.debate_id == debate_id, ExecutionAttempt.status == "active"
+                        ).values(status="failed", finished_at=debate.hidden_at, failed_stage="operator", failed_turn=turn))
+                        await session.execute(update(ProviderCallReservation).where(
+                            ProviderCallReservation.debate_id == debate_id,
+                            ProviderCallReservation.dispatch_state.in_(["reserved", "dispatched"])
+                        ).values(dispatch_state="abandoned"))
+                status = debate.status
+            # Invalidate ownership durably before requesting cancellation of an in-flight call.
+            task = self.tasks.get(run_id)
+            if task is not None:
+                task.cancel()
+            return {"id": debate_id, "hidden": True, "status": status}
 
     async def _failure(self, checkpoints, code, *, interrupted=False):
         try:

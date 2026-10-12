@@ -11,18 +11,19 @@ import json
 import os
 from dataclasses import dataclass
 from typing import Protocol
-
-
-REASONING_TOKEN_HEADROOM = 1500
+from app.engine.budget import REASONING_TOKEN_HEADROOM, authorize_dispatch, request_payload
 
 
 class ProviderError(Exception):
     """Raised when the provider fails to produce usable output."""
 
-    def __init__(self, message: str, *, retryable: bool = True, retry_after: float | None = None):
+    def __init__(self, message: str, *, retryable: bool = True, retry_after: float | None = None,
+                 input_tokens: int | None = None, output_tokens: int | None = None):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
 
 
 @dataclass(frozen=True)
@@ -132,22 +133,11 @@ class GroqProvider:
     async def complete(
         self, *, system: str, user: str, max_output_tokens: int, json_schema: dict | None = None
     ) -> ProviderResponse:
-        # gpt-oss models are reasoning models: hidden thinking tokens count against
-        # max_completion_tokens, so add headroom on top of the visible-output budget.
-        kwargs: dict = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_completion_tokens": max_output_tokens + REASONING_TOKEN_HEADROOM,
-            "reasoning_effort": "low",
-        }
-        if json_schema is not None:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "judgment", "strict": True, "schema": json_schema},
-            }
+        try:
+            authorize_dispatch(self._model, system, user, max_output_tokens, json_schema)
+        except ValueError:
+            raise ProviderError("A durable provider reservation is required", retryable=False) from None
+        kwargs = {"model": self._model, **request_payload(system, user, max_output_tokens, json_schema)}
 
         try:
             completion = await self._client.chat.completions.create(**kwargs)
@@ -164,12 +154,13 @@ class GroqProvider:
             ) from exc
 
         choice = completion.choices[0]
+        usage = getattr(completion, "usage", None)
+        counts = {"input_tokens": getattr(usage, "prompt_tokens", None), "output_tokens": getattr(usage, "completion_tokens", None)}
         if choice.finish_reason == "length":
-            raise ProviderError("Groq output was cut off at the token limit")
+            raise ProviderError("Groq output was cut off at the token limit", **counts)
         text = choice.message.content or ""
         if not text.strip():
-            raise ProviderError("Groq returned empty output")
-        usage = getattr(completion, "usage", None)
+            raise ProviderError("Groq returned empty output", **counts)
         return ProviderResponse(
             text=text,
             input_tokens=getattr(usage, "prompt_tokens", None),

@@ -7,13 +7,15 @@ from __future__ import annotations
 import json
 
 from pydantic import BaseModel, Field, ValidationError
+from app.engine.screening import contains_profanity
 
 SPEECH_WORD_CAP = 250
 
 
 class ValidationFailure(Exception):
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, code: str = "provider_failed") -> None:
         self.reason = reason
+        self.code = code
         super().__init__(reason)
 
 
@@ -24,7 +26,13 @@ def validate_speech(text: str) -> str:
     word_count = len(stripped.split())
     if word_count > SPEECH_WORD_CAP:
         raise ValidationFailure(f"speech exceeds {SPEECH_WORD_CAP} words ({word_count})")
+    screen_text(stripped)
     return stripped
+
+
+def screen_text(text: str) -> None:
+    if contains_profanity(text):
+        raise ValidationFailure("Output was rejected by the profanity filter", code="content_flagged")
 
 
 class _CriterionScoresModel(BaseModel):
@@ -89,5 +97,8 @@ def validate_judgment(raw_text: str, *, known_message_ids: set[str]) -> JudgeOut
     unknown = [mid for mid in parsed.referenced_message_ids if mid not in known_message_ids]
     if unknown:
         raise ValidationFailure(f"judge referenced unknown message ids: {unknown}")
+
+    for field in ("pro_strengths", "pro_weaknesses", "con_strengths", "con_weaknesses", "overall_explanation"):
+        screen_text(getattr(parsed, field))
 
     return parsed

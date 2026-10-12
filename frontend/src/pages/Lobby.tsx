@@ -64,6 +64,6 @@ export function Lobby() {
           <button className="button primary" disabled={busy !== null} onClick={() => { void start(topic) }}>{busy === topic.id ? 'Preparing battle…' : 'Start battle →'}</button>
         </article>)}</div>}
     </section>
-    <section className="rules"><div><h3>A fair format</h3><p>Opening, rebuttal, closing. Fixed sides and equal speaking turns.</p></div><div><h3>Arguments, assessed</h3><p>An AI judge scores reasoning, relevance, rebuttal, and clarity. This is an assessment, not verified fact.</p></div><div><h3>Come back anytime</h3><p>Speeches are saved as the debate progresses. This browser keeps the token to start or resume it.</p></div></section>
+    <section className="rules"><div><h3>A fair format</h3><p>Opening, rebuttal, closing. Fixed sides and equal speaking turns.</p></div><div><h3>Arguments, assessed</h3><p>An AI judge scores reasoning, relevance, rebuttal, and clarity. This is an assessment, not verified fact.</p><p>Outputs pass through a basic profanity filter. It can miss harmful content and flag legitimate wording.</p></div><div><h3>Come back anytime</h3><p>Speeches are saved as the debate progresses. This browser keeps the token to start or resume it.</p></div></section>
   </>
 }

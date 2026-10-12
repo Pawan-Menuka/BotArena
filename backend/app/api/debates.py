@@ -120,15 +120,13 @@ async def run(debate_id: str, request: Request):
         if not verify_token(request.headers.get("X-Debate-Token"), debate.execution_token_hash):
             raise APIError(403, "forbidden", "Execution token required or invalid.")
     try:
-        if request.app.state.settings.deployment_mode == "shared":
-            raise APIError(503, "cost_governance_unavailable", "Shared execution is unavailable until provider spending guards are installed.")
         return await request.app.state.executions.admit(debate_id, identity=getattr(request.state, "identity", None))
     except OrchestratorError as exc:
-        quota = exc.code in {"concurrency_per_ip", "global_concurrency"}
-        status = 429 if quota else (404 if exc.code == "not_found" else (503 if exc.code == "capacity_unavailable" else 409))
+        quota = exc.code in {"concurrency_per_ip", "global_concurrency", "global_usage_limit"}
+        status = 429 if quota else (404 if exc.code == "not_found" else (503 if exc.code in {"capacity_unavailable", "usage_configuration", "token_accounting_unconfirmed"} else 409))
         message = "Battle not found." if status == 404 else ("Execution capacity unavailable. Try again shortly." if status == 503 else "Battle cannot start or resume in its current state.")
         if quota:
-            message = "Active execution allowance reached. Try again shortly."
+            message = "Provider usage allowance reached. Try again later." if exc.code == "global_usage_limit" else "Active execution allowance reached. Try again shortly."
         raise APIError(status, exc.code, message, retry_after=5 if quota else None) from None
 
 

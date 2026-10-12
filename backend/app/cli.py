@@ -1,20 +1,24 @@
-"""Phase 1 exit-criterion runner: `uv run python -m app.cli` produces one coherent,
-end-to-end debate from the fixed six-turn engine plus judging.
-"""
+"""Run one local debate with persisted checkpoints and provider reservations."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import os
+import secrets
 import sys
 from pathlib import Path
-
-from dotenv import load_dotenv
+from uuid import uuid4
 
 from app.engine.models import DebateResult, Topic
-from app.engine.orchestrator import OrchestratorError, run_debate
+from app.engine.orchestrator import OrchestratorError
 from app.engine.provider import FakeProvider, Provider
+from app.config import Settings
+from app.core.auth import token_hash
+from app.db.base import create_database
+from app.db.migrate import upgrade_database
+from app.db.repo import DebateRepository
 
 TOPICS_PATH = Path(__file__).parent / "data" / "topics.json"
 
@@ -63,18 +67,36 @@ def print_result(result: DebateResult) -> None:
 
 async def main_async(args: argparse.Namespace) -> int:
     topic = find_topic(args.topic)
-    provider = build_provider(args.provider)
+    settings = Settings()
+    if settings.deployment_mode != "local":
+        print("The CLI is available only in local mode; shared execution uses the authenticated API.", file=sys.stderr)
+        return 1
+    model_id = "fake" if args.provider == "fake" else os.getenv("GROQ_MODEL", "unconfigured")
     try:
-        result = await run_debate(topic=topic, provider=provider)
+        settings.validate_execution_budget(model_id)
+    except ValueError:
+        print("Provider pricing, input accounting or spending configuration needs attention.", file=sys.stderr)
+        return 1
+    provider = build_provider(args.provider)
+    engine, sessions = create_database(settings.database_path)
+    try:
+        await upgrade_database(engine)
+        repo = DebateRepository(sessions, settings=settings)
+        debate_id = await repo.create(topic=topic, client_request_id=str(uuid4()), execution_token_hash=token_hash(secrets.token_hex(32)))
+        result = await repo.execute(debate_id, provider=provider, model_id=model_id)
     except OrchestratorError as exc:
         print(f"Debate failed at stage '{exc.stage}': {exc.reason}", file=sys.stderr)
         return 1
+    finally:
+        close = getattr(provider, "aclose", None)
+        if close is not None:
+            await close()
+        await engine.dispose()
     print_result(result)
     return 0
 
 
 def main() -> None:
-    load_dotenv()
     sys.stdout.reconfigure(encoding="utf-8")  # Windows consoles default to cp1252
     parser = argparse.ArgumentParser(description="Run one BotArena debate end to end.")
     parser.add_argument("--topic", default="ai-replace-teachers")

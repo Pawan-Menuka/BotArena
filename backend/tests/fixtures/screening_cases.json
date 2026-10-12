@@ -1,0 +1,15 @@
+{
+  "acceptable": [
+    "Classroom instruction and analytical reasoning support learning.",
+    "Social media age verification must protect teen privacy.",
+    "A four-day work week may not suit every industry equally.",
+    "Teachers should discuss public health with care.",
+    "The classic classroom example illustrates the assumptions.",
+    "Scunthorpe has classrooms and public schools.",
+    "Assignments should be assessed fairly.",
+    "Adolescents need support, privacy and trusted relationships."
+  ],
+  "known_false_positives": [
+    "Sex education should be age appropriate."
+  ]
+}

@@ -14,6 +14,7 @@ from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 
 from app.api.debates import router
+from app.api.admin import router as admin_router
 from app.api.errors import APIError
 from app.cli import load_topics
 from app.config import Settings
@@ -36,6 +37,14 @@ def create_app(settings: Settings | None = None, *, provider_factory=FakeProvide
     @asynccontextmanager
     async def lifespan(app):
         settings.validate_shared()
+        if settings.deployment_mode == "shared":
+            from app.engine.budget import price_for
+            if settings.cost_cap_cents is None:
+                raise RuntimeError("Shared deployment requires MAX_RESERVED_COST_24H_USD")
+            try:
+                price_for(settings.groq_model)
+            except ValueError:
+                raise RuntimeError("Shared deployment requires confirmed model pricing") from None
         engine, sessions = create_database(settings.database_path)
         try:
             await upgrade_database(engine)
@@ -120,6 +129,7 @@ def create_app(settings: Settings | None = None, *, provider_factory=FakeProvide
         return {"status": "ready"}
 
     app.include_router(router)
+    app.include_router(admin_router)
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                        allow_methods=["GET", "POST"], allow_headers=["Content-Type", "X-Debate-Token"],
                        expose_headers=["Retry-After"])
@@ -127,7 +137,7 @@ def create_app(settings: Settings | None = None, *, provider_factory=FakeProvide
     @app.middleware("http")
     async def cache_policy(request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith("/api/debates"):
+        if request.url.path.startswith(("/api/debates", "/api/admin")):
             response.headers["Cache-Control"] = "no-store"
         return response
 

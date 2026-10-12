@@ -7,6 +7,9 @@ import secrets
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from types import SimpleNamespace
+import time
 from uuid import uuid4
 
 import httpx
@@ -29,7 +32,8 @@ TOPIC = "four-day-work-week"
 def shared_settings(path, **kwargs):
     return Settings(database_path=path, deployment_mode="shared", admin_token=SECRET,
                     rate_limit_hmac_secret=SECRET[::-1], groq_api_key="gsk_" + SECRET,
-                    groq_model="openai/gpt-oss-20b", trusted_proxy_networks=("127.0.0.0/8",), **kwargs)
+                    groq_model="openai/gpt-oss-20b", trusted_proxy_networks=("127.0.0.0/8",),
+                    max_reserved_cost_24h_usd=Decimal("1.00"), **kwargs)
 
 
 @asynccontextmanager
@@ -49,6 +53,15 @@ def creation(*, ip="192.0.2.1", request_id=None, token=None):
 
 def identity_request(peer, headers):
     return Request({"type": "http", "client": (peer, 1234), "headers": [(name.lower().encode(), value.encode()) for name, value in headers]})
+
+
+@pytest.fixture
+def rate_clock(monkeypatch):
+    now = {"value": time.time()}
+    clock = SimpleNamespace(time=lambda: now["value"])
+    monkeypatch.setattr("limits.storage.memory.time", clock)
+    monkeypatch.setattr("app.core.ratelimit.time", clock)
+    return now
 
 
 @pytest.mark.parametrize("field", ["admin_token", "rate_limit_hmac_secret", "groq_api_key", "groq_model"])
@@ -97,7 +110,7 @@ def test_invalid_trusted_identity_fails_without_disclosing_address(tmp_path, hea
     assert "192.0.2" not in error.value.message
 
 
-async def test_ten_polling_viewers_fit_combined_read_bucket(tmp_path):
+async def test_ten_polling_viewers_fit_combined_read_bucket(tmp_path, rate_clock):
     async with shared_app(tmp_path / "polling.db") as (_, client):
         async def viewer():
             for _ in range(40):
@@ -111,9 +124,11 @@ async def test_ten_polling_viewers_fit_combined_read_bucket(tmp_path):
         assert 1 <= int(response.headers["Retry-After"]) <= 60
         assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
         assert (await client.get("/api/topics", headers={"Fly-Client-IP": "192.0.2.2"})).status_code == 200
+        rate_clock["value"] += 60
+        assert (await client.get("/api/topics")).status_code == 200
 
 
-async def test_combined_post_flood_bucket_and_admin_isolation(tmp_path):
+async def test_combined_post_flood_bucket_and_admin_isolation(tmp_path, rate_clock):
     async with shared_app(tmp_path / "flood.db") as (_, client):
         for index in range(20):
             response = await client.post("/api/debates" if index % 2 else "/api/debates/missing/run")
@@ -129,6 +144,8 @@ async def test_combined_post_flood_bucket_and_admin_isolation(tmp_path):
         assert (await client.get("/api/topics")).status_code == 200
         assert (await client.options("/api/debates", headers={"Origin": "http://localhost:5173",
                        "Access-Control-Request-Method": "POST"})).status_code == 200
+        rate_clock["value"] += 60
+        assert (await client.post("/api/debates", **creation())).status_code == 201
 
 
 async def test_default_creation_limit_and_replays_before_quota(tmp_path):
@@ -219,9 +236,10 @@ async def test_shared_execution_is_blocked_until_cost_guards(tmp_path):
         data = creation()
         response = await client.post("/api/debates", **data)
         debate_id = response.json()["id"]
+        app.state.executions.model_id = "openai/gpt-oss-20b"
         run = await client.post(f"/api/debates/{debate_id}/run", headers=data["headers"])
         assert run.status_code == 503
-        assert run.json()["error"]["code"] == "cost_governance_unavailable"
+        assert run.json()["error"]["code"] == "usage_configuration"
         assert run.headers["Retry-After"] == "5"
         async with app.state.sessions() as session:
             assert (await session.get(Debate, debate_id)).accepted_attempts == 0

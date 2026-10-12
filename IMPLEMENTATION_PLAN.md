@@ -395,51 +395,187 @@ Implementation handoff:
   in backend/.env.example; the real .env was not accessed. Work remains uncommitted on the
   existing codex/phase-2-persistence-resume branch together with Phases 3–4.
 
-## Phase 6 — Cost governance [pending]
+## Phase 6 — Cost governance [done]
 
 Goal: no provider call without a prior durable reservation. Blueprint §13. Est. 8–10h.
 
 Tasks:
-- [ ] Confirm current Groq pricing/limits for `openai/gpt-oss-20b` from Groq's official
+- [x] Confirm current Groq pricing/limits for `openai/gpt-oss-20b` from Groq's official
   console docs (not third-party trackers); store as a `price_version`-tagged config.
-- [ ] Reservation function: in ONE transaction check run ownership, per-stage/per-debate/global
+- [x] Reservation function: in ONE transaction check run ownership, per-stage/per-debate/global
   call allowances (global 300 calls/24h) and the cost allowance (`MAX_RESERVED_COST_24H_USD`,
   no default — fail closed in `shared` mode if unset), insert `ProviderCallReservation`
   (integer cents, conservative), bump counters. ALL provider calls (retries, resumes) go
   through it; no SDK-internal retries bypass it (set `max_retries=0` or route them through).
-- [ ] Reservations stay counted for the full window even after crashes; record actual tokens/
+- [x] Reservations stay counted for the full window even after crashes; record actual tokens/
   cost when known without refunding automatically. Mid-match allowance exhaustion → fail at
   checkpoint with `global_usage_limit`, no auto-resume.
-- [ ] Reject oversized prompts rather than send unbounded; keep token caps (speech 512,
+- [x] Reject oversized prompts rather than send unbounded; keep token caps (speech 512,
   judgment 2048 visible, plus reasoning headroom — account for it in the reserved maximum).
-- [ ] `GET /api/admin/stats` (+ `X-Admin-Token` auth, `401` otherwise): active debates,
+- [x] `GET /api/admin/stats` (+ `X-Admin-Token` auth, `401` otherwise): active debates,
   creations in window, reserved vs actual spend, remaining allowances, failures by stage/code,
   DB size. No raw IPs.
-- [ ] Tests: simultaneous last-budget callers can't overspend; crash leaves reservation
+- [x] Tests: simultaneous last-budget callers can't overspend; crash leaves reservation
   counted; retries/resumes from earlier days count; unset cost cap blocks paid work in
   `shared` mode.
 
 Exit criterion: no dispatch happens without a reservation; stats show reserved vs actual.
 
-## Phase 7 — Content screening and moderation ops [pending]
+Phase 6 verification (2026-10-12):
+- Committed the completed Phase 3–5 work before starting: `e27cbfe`, "Implement execution
+  API, frontend, and anti-abuse guards", on codex/phase-2-persistence-resume. Not pushed.
+- Verified Groq's official [model pricing/limits](https://console.groq.com/docs/model/openai/gpt-oss-20b)
+  and [rate limits](https://console.groq.com/docs/rate-limits). Stored source links/date and
+  `groq-standard-2026-10-12` in app/data/pricing.json: standard uncached input $0.075/M,
+  output $0.30/M, context 131072, max output 65536. Published free-plan base limits are
+  30 RPM, 1000 RPD, 8000 TPM, 200000 TPD; account-specific limits may differ.
+- `uv run pytest -q`: **154 passed in 33.57s** (127 existing + 27 cost-governance cases).
+  Covers a durable reservation visible before every persistent provider dispatch, counters
+  and caps, SDK permit matching/single use and a fully mocked seven-call SDK integration,
+  simultaneous last-call/last-cent claims, stage limits, crash/reconnect retention, next-day
+  retries/resumes, actual usage on success/truncation, oversize input and stale-run refusal,
+  mid-match exhaustion preserving speeches, accounting-breach latch, missing/invalid caps,
+  unconfirmed-input refusal, authenticated/private admin stats, CLI persistence, no redispatch
+  after usage-storage failure, shared FakeProvider flow with per-IP limits, and HTTP budget
+  admission rejection without consuming an attempt. Tests never call Groq.
+- Required offline CLI completed six persisted speeches and judging: Pro 80, Con 75, DRAW.
+- `uv run alembic check`: `No new upgrade operations detected.` `git diff --check`: clean.
+- Exit criterion met for the reservation implementation and fake/offline-SDK execution.
+  Remaining: none in the software implementation. Paid activation remains deliberately
+  gated on verified input accounting and an explicit daily cost cap; see below.
+  Next: Phase 7 after sign-off. Phase 6 changes remain uncommitted.
+
+Implementation handoff:
+- app/core/costs.py reserves in one short writer transaction: verify run ownership, stage
+  allowance (3 per attempt), debate allowance (30), global rolling call count (default 300),
+  and reserved cents; insert reservation and increment debate/attempt counters atomically.
+  Provider calls happen after commit with no database transaction held. Admission checks
+  initial headroom too and rolls back a rejected claim without consuming an attempt.
+- Reserve the full 8192 input cap plus 2012 speech / 3548 judgment output tokens (existing
+  1500 reasoning headroom included). Round up to whole cents per call: the current real
+  profile reserves 1 cent per call, so 300 calls conservatively reserve $3. Fake calls reserve
+  zero cents but count toward call allowances. Unknown real-model prices fail closed.
+- Global call quota and cost cap apply at reservation time to retries and resumes regardless
+  of debate creation date. Failed/abandoned/crashed reservations remain counted until their
+  rolling 24h expiry; never refund from actual usage. Mid-run exhaustion persists a resumable
+  `global_usage_limit` failure and never restarts automatically.
+- Each real SDK dispatch needs a matching one-use request permit created only after the
+  durable reservation. Groq SDK retries remain disabled. Pure in-memory FakeProvider engine
+  unit tests retain their Phase 1 seam; production API and CLI calls use the durable path.
+- Successful responses capture usage before speech validation/commit; valid content marks
+  its reservation committed in the content transaction. Invalid retries, provider failures,
+  cancellation, and reconciliation mark failed/abandoned without reducing reserved amounts.
+  Missing usage remains unknown. Recorded actual cost is an uncached-rate token estimate,
+  rounded up per call to cents, not the provider invoice (free credits/cache discounts differ).
+- IMPORTANT PAID ACTIVATION NOTE: provider-side strict-schema/chat token framing is not
+  confirmed by the public docs. The request-size guard uses UTF-8 serialized bytes plus
+  1024 framing allowance; this is a conservative candidate bound, not a verified Groq token
+  count. INPUT_ACCOUNTING_CONFIRMED defaults false, and all real-model dispatch/admission
+  fails closed while false, including local CLI. Do not set it true merely to get past the
+  gate. Verify against Groq usage for the actual payload/template before paid activation;
+  real-model runs require user approval under AGENTS.md. Carry this check into Phase 9's
+  approved real-model review. Fake execution does not require this flag.
+- If reported input/output exceeds a reservation, retain usage and stop with
+  `token_accounting_unconfirmed`; future paid admission/dispatch for that model/price version
+  stays blocked by the persisted breach. Review the bound/profile and publish a newly
+  verified profile version before reactivation; do not erase the audit record.
+- MAX_RESERVED_COST_24H_USD has no default; shared startup requires a positive whole-cent
+  amount and a supported pricing profile. GLOBAL_CALL_QUOTA_24H defaults 300. Configuration
+  is documented only in .env.example; real .env was not read. No real model calls were made.
+- `/api/admin/stats` requires X-Admin-Token and returns no-store usage/allowance/failure
+  aggregates, known/unknown actual-cost counts, accounting breaches, and database/WAL/SHM
+  bytes. No raw IPs, bucket hashes, execution secrets, paths, or transcript text.
+- CLI is local-only and now persists debates/reservations to DATABASE_PATH with stable UUID
+  speech IDs. It no longer loads .env implicitly; configure process environment explicitly.
+  It does not expose the generated execution token or provide browser resume control for
+  CLI-created runs. Browser-created debates retain the normal creator token/resume flow.
+- Refreshed the idle local FakeProvider preview backend on 127.0.0.1:8000 using the existing
+  ignored phase4-browser.db; health reports ready and unauthenticated admin stats returns 401.
+  The frontend preview remains at 127.0.0.1:5173. No paid execution was started.
+
+## Phase 7 — Content screening and moderation ops [done]
 
 Goal: basic screening plus an operator kill-switch. Blueprint §5 (hide), §14. Est. 4–6h.
 
 Tasks:
-- [ ] `better-profanity` (or equivalent offline wordlist) check on every speech and every
+- [x] `better-profanity` (or equivalent offline wordlist) check on every speech and every
   judge free-text field before commit. A flag = corrective retry inside the existing 3-call
   stage budget (no new budget). Exhaustion → `content_flagged`, earlier speeches preserved,
   resumable. Be honest in docs/UI that this is a profanity filter, not moderation.
-- [ ] `POST /api/admin/debates/{id}/hide`: set `hidden`; if active, bump revision, invalidate
+- [x] `POST /api/admin/debates/{id}/hide`: set `hidden`; if active, bump revision, invalidate
   `run_id` ownership, mark `failed` with `operator_hidden`, cancel the worker; late output must
   not commit. `GET /api/admin/debates/{id}` shows hidden content. Hidden debates `404` on every
   public path (detail, list, replay-create, run).
-- [ ] Optional side-consistency safeguard (see Phase 1 open notes): a cheap check or judge
+- [x] Optional side-consistency safeguard (see Phase 1 open notes): a cheap check or judge
   instruction that flags a speech arguing the wrong side. Decide with the user before building.
-- [ ] Tests: flagged speech consumes the existing retry budget; acceptable-topic fixtures
+  **Deferred:** no safeguard or prompt change implemented; carry the choice to Phase 9's
+  user-reviewed model-quality work, as already recorded in the Phase 1 quality notes.
+- [x] Tests: flagged speech consumes the existing retry budget; acceptable-topic fixtures
   measure false positives; hide mid-run stops further provider calls and blocks late commits.
 
 Exit criterion: flags share the retry budget; hide stops a live debate immediately.
+
+Phase 7 verification (2026-10-12):
+- Installed better-profanity 0.7.0 with `uv add`, inspected its real API, and used the bundled
+  default offline wordlist without exceptions or new provider calls.
+- `uv run pytest -q`: **182 passed in 37.50s** (154 existing + 28 moderation cases).
+  Covers speech rejection/corrective retries, all five judge free-text fields, shared three-call
+  stage budgets, flagged turn-4 exhaustion and resume with original prefix IDs/content,
+  judging-only resume after flagged judgment, mixed validation failures, wordlist baseline,
+  admin auth and input validation, idempotent hiding of created/completed/failed debates,
+  content retention and secret exclusion, every hidden public path, active speech/judgment
+  cancellation, a cancellation-resistant late response, hide between reservation and dispatch,
+  final dispatch/hide lock serialization, simultaneous Start/hide, and hide transaction rollback.
+- `npm test -- --pool=threads --maxWorkers=1`: **23 passed**, 5 files, 7.75s.
+  Includes the new lobby explanation of profanity-filter limitations. `npm run build`:
+  TypeScript and Vite build succeeded (36 modules).
+- Required offline CLI completed six persisted speeches and judging: Pro 80, Con 75, DRAW.
+  `uv run alembic check`: `No new upgrade operations detected.` `git diff --check`: clean.
+- Initial combined verification encountered a prolonged machine/test-worker pause: Vitest
+  fork workers timed out without running tests, and a wall-clock minute-window test expired
+  during the pause (181 backend tests passed, 1 failed). Retried Vitest with a single thread
+  worker; gave the two rate-window tests a controlled library clock and explicit expiry checks.
+  The final full backend run and frontend thread run above passed. No product rate-limit
+  behavior was changed for this test-timing fix.
+- Exit criterion met. Remaining: none within Phase 7. Next: Phase 8 after sign-off.
+  No real Groq calls, deployment, commits, or pushes were performed; Phases 6–7 are uncommitted.
+
+Implementation handoff:
+- app/engine/screening.py owns one offline default Profanity instance. Validation checks each
+  speech and pro_strengths/pro_weaknesses/con_strengths/con_weaknesses/overall_explanation
+  before scoring or committing. Text is rejected, never censored and saved. Errors and retry
+  instructions do not echo offending terms. AI text still renders as plain text.
+- ValidationFailure carries a code; RetryPolicy uses its existing three dispatches and
+  durable reservations. Content flags get a specific corrective instruction; exhaustion while
+  the last failure is a flag persists `content_flagged`. Prior committed speeches remain
+  readable, and eligible creators can Resume manually. A later non-content failure keeps
+  its own failure category instead of reusing an earlier flag.
+- False-positive fixtures: all 22 seeded topic/default-output/benign edge samples pass;
+  the intentionally recorded legitimate phrase "Sex education should be age appropriate."
+  is flagged by the default list. This limited baseline is not a general accuracy estimate.
+  No allowlist changes were made. Lobby copy explicitly says the profanity filter can miss
+  harmful content and flag legitimate wording; it is not comprehensive moderation.
+- `POST /api/admin/debates/{id}/hide`, X-Admin-Token required, accepts no body or optional
+  `{reason: string}` (nonblank, at most 500 characters). First hide stores the reason/time
+  and increments revision; repeated hides preserve that metadata and do not bump revision.
+  Completed/failed/created status and saved content remain intact when not active.
+- Active hide atomically sets hidden, changes status to failed with `operator_hidden`,
+  clears run ownership/progress, finishes the active attempt as failed, and marks outstanding
+  reservations abandoned without refunds. Only after commit does it cancel the registered
+  worker. A failed hide transaction leaves visibility/ownership and the live worker unchanged.
+- Final dispatch authorization/task creation shares the manager's hide/admission lock;
+  the lock and database transaction are released before awaiting the provider. Cancellation
+  propagates to the provider child task. Late responses can record already-spent usage but
+  cannot reopen abandoned reservations or commit speech/judgment after ownership is revoked.
+  Hiding cannot undo a provider call already in flight.
+- `GET /api/admin/debates/{id}`, X-Admin-Token required, returns the full transcript/judgment,
+  moderation metadata and attempt/call counts even when hidden; no execution token/hash or
+  client identity. Admin endpoints remain no-store and share the separate admin rate bucket.
+  Public detail/run/replay return 404 for hidden debates; history omits them.
+- Local preview backend was refreshed on 127.0.0.1:8000 with FakeProvider and the existing
+  ignored phase4-browser.db after confirming no active debates. Frontend remains at
+  127.0.0.1:5173. Admin operations require an explicitly configured process ADMIN_TOKEN;
+  the preview does not generate or expose one. Paid-activation gates from Phase 6 remain.
 
 ## Phase 8 — Backup/restore [pending]
 
@@ -539,3 +675,17 @@ Exit criterion: blueprint §17 checklist fully checked. **Checkpoint B reached h
   Phase 8 backup scope. The npm registry issue was confirmed by the user to be their original
   network connection; switching connections restored access. Frontend dependency changes
   were left out of this backend phase.
+- Phase 6 (2026-10-12): committed Phases 3–5 as e27cbfe before implementing reservations.
+  Chose explicit fail-closed input-accounting confirmation because the provider's strict
+  JSON/chat framing is undocumented; the byte-based candidate bound is not represented as
+  verified tokenization. Paid activation/real usage verification is still operator work,
+  while all reservation behavior is tested offline. Kept conservative whole-cent accounting
+  as required by the existing schema, exposed its rounding/billing limits in admin stats,
+  and moved the CLI onto the same persistent budget path. No new dependencies or schema
+  migration were needed. No push, real Groq run, or deployment was performed.
+- Phase 7 (2026-10-12): used better-profanity's default list without exceptions and recorded
+  its known benign "sex education" false positive. Added the planned operator hide/inspection
+  APIs, preserving content and cost evidence. Closed the authorization-to-dispatch hide race
+  with the existing manager lock and a cancellable provider child task, without holding a DB
+  transaction or process lock while waiting on the provider. Optional side-consistency checks
+  stay deferred to the user-reviewed Phase 9 quality work. No new schema revision or admin UI.

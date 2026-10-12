@@ -6,7 +6,8 @@ from dataclasses import asdict
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.db.models import Debate, DebateMessage, ExecutionAttempt, Judgment, new_id, utcnow
+from app.db.models import Debate, DebateMessage, ExecutionAttempt, Judgment, ProviderCallReservation, new_id, utcnow
+from app.config import Settings
 from app.engine.models import Agent, ROUND_NUMBER, TURN_ORDER, Side, Speech, Topic
 from app.engine.orchestrator import run_debate, validate_checkpoint
 from app.engine.retry import OrchestratorError
@@ -32,8 +33,10 @@ async def load_speeches(session, debate_id: str) -> list[Speech]:
 
 
 class DebateRepository:
-    def __init__(self, sessions):
+    def __init__(self, sessions, settings: Settings | None = None, *, dispatch_lock=None):
         self.sessions = sessions
+        self.settings = settings or Settings()
+        self.dispatch_lock = dispatch_lock
 
     async def create(self, *, topic: Topic, client_request_id: str, execution_token_hash: str) -> str:
         debate = Debate(topic_id=topic.id, topic_snapshot=asdict(topic), client_request_id=client_request_id,
@@ -100,6 +103,16 @@ class DebateRepository:
                 debate.failed_stage = "checkpoint"
                 speeches = None
             if speeches is not None:
+                from app.core.costs import check_allowance
+                from app.engine.budget import INPUT_TOKEN_CAP, REASONING_TOKEN_HEADROOM, price_for
+                try:
+                    self.settings.validate_execution_budget(model_id)
+                    price = price_for(model_id)
+                except ValueError:
+                    raise OrchestratorError("admission", "Provider usage configuration needs attention", code="usage_configuration") from None
+                cap = (2048 if len(speeches) == 6 else 512) + REASONING_TOKEN_HEADROOM
+                await check_allowance(session, self.settings, model_id,
+                                      price.cents(min(INPUT_TOKEN_CAP, price.context_window - cap), cap), "admission", utcnow())
                 debate.status = "judging" if len(speeches) == 6 else "running"
                 debate.activity = "evaluating" if len(speeches) == 6 else "generating"
                 debate.active_turn = None if len(speeches) == 6 else len(speeches) + 1
@@ -111,7 +124,7 @@ class DebateRepository:
                 topic = Topic(**debate.topic_snapshot)
         if speeches is None:
             raise OrchestratorError("checkpoint", "Saved checkpoint is inconsistent", code="checkpoint_invalid")
-        return Checkpoints(self.sessions, debate_id, run_id, model_id), topic, speeches
+        return Checkpoints(self.sessions, debate_id, run_id, model_id, self.settings, dispatch_lock=self.dispatch_lock), topic, speeches
 
     async def execute(self, debate_id: str, *, provider, model_id: str, retry_policy=None):
         checkpoints, topic, speeches = await self.begin_attempt(debate_id, model_id=model_id)
@@ -130,11 +143,14 @@ class DebateRepository:
 
 
 class Checkpoints:
-    def __init__(self, sessions, debate_id: str, run_id: str, model_id: str):
+    def __init__(self, sessions, debate_id: str, run_id: str, model_id: str, settings: Settings | None = None, *, dispatch_lock=None):
         self.sessions = sessions
         self.debate_id = debate_id
         self.run_id = run_id
         self.model_id = model_id
+        self.settings = settings or Settings()
+        self.retrying = False
+        self.dispatch_lock = dispatch_lock
 
     async def _update(self, session, **values):
         result = await session.execute(update(Debate).where(
@@ -145,18 +161,16 @@ class Checkpoints:
             raise OrchestratorError("ownership", "Execution no longer owns this debate", code="stale_run")
 
     async def before_call(self, stage: str, retrying: bool):
-        turn = int(stage.rsplit("_", 1)[1]) if stage.startswith("speech_turn_") else None
-        async with self.sessions.begin() as session:
-            # Acquire the writer before reading counters, preventing a deferred read/write upgrade race.
-            await self._update(session, activity="retrying" if retrying else ("generating" if turn else "evaluating"),
-                               active_turn=turn, active_speaker=TURN_ORDER[turn - 1][1].value if turn else None,
-                               current_round=ROUND_NUMBER[TURN_ORDER[turn - 1][0]] if turn else 3)
-            debate = await session.get(Debate, self.debate_id)
-            if debate.total_calls >= 30:
-                raise OrchestratorError(stage, "Debate call allowance exhausted", code="debate_call_limit")
-            debate.total_calls += 1
-            attempt = await session.get(ExecutionAttempt, self.run_id)
-            attempt.call_count += 1
+        self.retrying = retrying
+
+    async def dispatch(self, provider, stage, **kwargs):
+        from app.core.costs import dispatch_reserved
+        return await dispatch_reserved(self, provider, stage, self.retrying, **kwargs)
+
+    async def _commit_responses(self, session, stage):
+        await session.execute(update(ProviderCallReservation).where(
+            ProviderCallReservation.run_id == self.run_id, ProviderCallReservation.stage == stage,
+            ProviderCallReservation.dispatch_state == "dispatched").values(dispatch_state="committed"))
 
     async def commit_speech(self, speech: Speech):
         async with self.sessions.begin() as session:
@@ -168,6 +182,7 @@ class Checkpoints:
             session.add(DebateMessage(id=speech.message_id, debate_id=self.debate_id, agent=speech.agent.value,
                         side=speech.side.value, round_number=speech.round_number,
                         turn_order=speech.turn_order, content=speech.content))
+            await self._commit_responses(session, f"speech_turn_{speech.turn_order}")
 
     async def commit_judgment(self, judgment):
         async with self.sessions.begin() as session:
@@ -188,6 +203,7 @@ class Checkpoints:
             attempt = await session.get(ExecutionAttempt, self.run_id)
             attempt.status = "completed"
             attempt.finished_at = utcnow()
+            await self._commit_responses(session, "judgment")
 
     async def commit_failure(self, error: OrchestratorError, *, interrupted: bool = False):
         turn = int(error.stage.rsplit("_", 1)[1]) if error.stage.startswith("speech_turn_") else None
@@ -200,6 +216,12 @@ class Checkpoints:
             "attempt_timeout": "Execution exceeded its time limit. Saved speeches are preserved.",
             "internal_error": "Execution stopped unexpectedly. Saved speeches are preserved.",
             "storage_unavailable": "Storage was unavailable. Saved speeches are preserved.",
+            "global_usage_limit": "Provider usage allowance exhausted. Saved speeches are preserved; resume manually after capacity returns.",
+            "stage_call_limit": "This stage has reached its provider call allowance.",
+            "usage_configuration": "Provider pricing, input accounting or spending configuration needs attention.",
+            "prompt_too_large": "The saved debate exceeds the provider input allowance.",
+            "token_accounting_unconfirmed": "Provider usage accounting requires review before more paid work.",
+            "content_flagged": "Output was rejected by the profanity filter. Saved speeches are preserved; you can resume manually.",
         }
         async with self.sessions.begin() as session:
             result = await session.execute(update(Debate).where(
@@ -213,3 +235,7 @@ class Checkpoints:
                 attempt.finished_at = utcnow()
                 attempt.failed_stage = error.stage
                 attempt.failed_turn = turn
+                await session.execute(update(ProviderCallReservation).where(
+                    ProviderCallReservation.run_id == self.run_id,
+                    ProviderCallReservation.dispatch_state.in_(["reserved", "dispatched"])
+                ).values(dispatch_state="abandoned" if interrupted else "failed"))
