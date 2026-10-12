@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.models import Debate, DebateMessage, ExecutionAttempt, Judgment, new_id, utcnow
@@ -42,19 +42,52 @@ class DebateRepository:
             session.add(debate)
         return debate.id
 
-    async def begin_attempt(self, debate_id: str, *, model_id: str):
+    async def begin_attempt(self, debate_id: str, *, model_id: str, capacity: int | None = None,
+                            ip_bucket_hash: str | None = None, concurrency_per_ip: int | None = None):
         run_id = new_id()
         async with self.sessions.begin() as session:
+            conditions = []
+            per_ip = select(func.count()).select_from(ExecutionAttempt).join(
+                Debate, Debate.active_run_id == ExecutionAttempt.run_id
+            ).where(ExecutionAttempt.ip_bucket_hash == ip_bucket_hash, ExecutionAttempt.status == "active",
+                    Debate.status.in_(["running", "judging"])).scalar_subquery()
+            if concurrency_per_ip is not None:
+                if ip_bucket_hash is None:
+                    raise ValueError("Per-IP admission requires a bucket hash")
+                conditions.append(per_ip < concurrency_per_ip)
+            if capacity is not None:
+                active = select(func.count()).select_from(Debate).where(
+                    Debate.status.in_(["running", "judging"])
+                ).scalar_subquery()
+                conditions.append(active < capacity)
             claimed = await session.execute(update(Debate).where(
                 Debate.id == debate_id, Debate.hidden.is_(False), Debate.status.in_(["created", "failed"]),
                 Debate.accepted_attempts < 3, Debate.total_calls < 30,
-                (Debate.error_code.is_(None) | (Debate.error_code != "checkpoint_invalid"))
+                (Debate.error_code.is_(None) | (Debate.error_code != "checkpoint_invalid")),
+                *conditions,
             ).values(status="running", active_run_id=run_id, accepted_attempts=Debate.accepted_attempts + 1,
                      revision=Debate.revision + 1, updated_at=utcnow(), error_code=None, error_message=None,
                      failed_stage=None, failed_turn=None).returning(Debate))
             debate = claimed.scalar_one_or_none()
             if debate is None:
-                raise OrchestratorError("admission", "Debate cannot accept an execution", code="execution_rejected")
+                existing = await session.get(Debate, debate_id)
+                if existing is None or existing.hidden:
+                    code = "not_found"
+                elif existing.status in {"running", "judging"}:
+                    code = "already_active"
+                elif existing.status == "completed":
+                    code = "already_completed"
+                elif existing.accepted_attempts >= 3:
+                    code = "attempt_limit"
+                elif existing.total_calls >= 30:
+                    code = "debate_call_limit"
+                elif existing.error_code == "checkpoint_invalid":
+                    code = "checkpoint_invalid"
+                elif concurrency_per_ip is not None and await session.scalar(select(per_ip)) >= concurrency_per_ip:
+                    code = "concurrency_per_ip"
+                else:
+                    code = "global_concurrency" if ip_bucket_hash is not None else "capacity_unavailable"
+                raise OrchestratorError("admission", "Debate cannot accept an execution", code=code)
             try:
                 speeches = await load_speeches(session, debate_id)
             except OrchestratorError:
@@ -70,9 +103,11 @@ class DebateRepository:
                 debate.status = "judging" if len(speeches) == 6 else "running"
                 debate.activity = "evaluating" if len(speeches) == 6 else "generating"
                 debate.active_turn = None if len(speeches) == 6 else len(speeches) + 1
+                debate.active_speaker = TURN_ORDER[len(speeches)][1].value if len(speeches) < 6 else None
+                debate.current_round = ROUND_NUMBER[TURN_ORDER[len(speeches)][0]] if len(speeches) < 6 else 3
                 session.add(ExecutionAttempt(run_id=run_id, debate_id=debate_id,
                             attempt_number=debate.accepted_attempts, starting_checkpoint=len(speeches),
-                            model_id=model_id, prompt_version=PROMPT_VERSION))
+                            model_id=model_id, prompt_version=PROMPT_VERSION, ip_bucket_hash=ip_bucket_hash))
                 topic = Topic(**debate.topic_snapshot)
         if speeches is None:
             raise OrchestratorError("checkpoint", "Saved checkpoint is inconsistent", code="checkpoint_invalid")
@@ -162,6 +197,9 @@ class Checkpoints:
             "checkpoint_invalid": "Saved checkpoint is inconsistent and cannot be resumed.",
             "debate_call_limit": "This debate has reached its provider call allowance.",
             "server_interrupted": "Execution was interrupted. Saved speeches are preserved.",
+            "attempt_timeout": "Execution exceeded its time limit. Saved speeches are preserved.",
+            "internal_error": "Execution stopped unexpectedly. Saved speeches are preserved.",
+            "storage_unavailable": "Storage was unavailable. Saved speeches are preserved.",
         }
         async with self.sessions.begin() as session:
             result = await session.execute(update(Debate).where(

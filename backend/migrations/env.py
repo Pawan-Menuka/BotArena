@@ -34,4 +34,8 @@ if context.is_offline_mode():
     with context.begin_transaction():
         context.run_migrations()
 else:
-    asyncio.run(online())
+    connection = context.config.attributes.get("connection")
+    if connection is not None:
+        configure(connection)
+    else:
+        asyncio.run(online())

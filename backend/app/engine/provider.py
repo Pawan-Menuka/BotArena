@@ -175,3 +175,6 @@ class GroqProvider:
             input_tokens=getattr(usage, "prompt_tokens", None),
             output_tokens=getattr(usage, "completion_tokens", None),
         )
+
+    async def aclose(self) -> None:
+        await self._client.close()

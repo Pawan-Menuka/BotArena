@@ -12,6 +12,7 @@ backend/.env
 # Node (frontend, from Phase 4 onward)
 frontend/node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
 
 # SQLite data (from Phase 2 onward)
 backend/*.db
