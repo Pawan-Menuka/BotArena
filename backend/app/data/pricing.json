@@ -1,0 +1,15 @@
+{
+  "price_version": "groq-standard-2026-10-12",
+  "verified_at": "2026-10-12",
+  "source": "https://console.groq.com/docs/model/openai/gpt-oss-20b",
+  "rate_limits_source": "https://console.groq.com/docs/rate-limits",
+  "models": {
+    "openai/gpt-oss-20b": {
+      "input_usd_per_million": "0.075",
+      "output_usd_per_million": "0.30",
+      "context_window": 131072,
+      "max_output_tokens": 65536,
+      "published_free_limits": {"rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000}
+    }
+  }
+}
