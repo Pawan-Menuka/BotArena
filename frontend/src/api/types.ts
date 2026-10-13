@@ -1,4 +1,5 @@
 export interface Topic { id: string; title: string; pro_framing: string; con_framing: string }
+export type TopicChoice = { topic_id: string; custom_topic?: never } | { custom_topic: string; topic_id?: never }
 export type Status = 'created' | 'running' | 'judging' | 'completed' | 'failed'
 export interface Message {
   id: string; agent: 'atlas' | 'nova'; side: 'pro' | 'con'; round_number: number

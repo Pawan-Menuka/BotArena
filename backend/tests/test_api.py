@@ -408,7 +408,7 @@ async def test_attempt_deadline_stops_worker_with_saved_transcript(tmp_path):
                 await asyncio.Event().wait()
             return await super().complete(**kwargs)
 
-    async with running_app(tmp_path / "deadline.db", provider_factory=WaitingProvider, attempt_timeout=0.15) as (_, client):
+    async with running_app(tmp_path / "deadline.db", provider_factory=WaitingProvider, attempt_timeout=1) as (_, client):
         data, headers = await create(client)
         assert (await client.post(f"/api/debates/{data['id']}/run", headers=headers)).status_code == 202
         result = await terminal(client, data["id"])

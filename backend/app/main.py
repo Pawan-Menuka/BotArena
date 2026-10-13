@@ -25,6 +25,7 @@ from app.db.base import create_database
 from app.db.migrate import upgrade_database
 from app.engine.lifecycle import ExecutionManager, reconcile
 from app.engine.provider import FakeProvider
+from app.ops.backup import BackupService
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,14 @@ def create_app(settings: Settings | None = None, *, provider_factory=FakeProvide
                 cleanup = asyncio.create_task(weekly_identity_cleanup(sessions), name="identity-cleanup")
             executions.start_supervisor()
             app.state.ready = True
+            backups = BackupService(settings.database_path)
+            app.state.backups = backups
+            backups.start(lambda: not executions.tasks)
             try:
                 yield
             finally:
                 app.state.ready = False
+                await backups.close()
                 if cleanup is not None:
                     cleanup.cancel()
                     await asyncio.gather(cleanup, return_exceptions=True)

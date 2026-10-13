@@ -22,6 +22,8 @@ backend/data/*.db-shm
 backend/*.db-wal
 backend/*.db-shm
 backend/backups/
+backend/data/backups/
+*.restore-pause
 
 # OS
 .DS_Store

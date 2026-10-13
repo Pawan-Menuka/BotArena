@@ -36,7 +36,7 @@ async function request<T>(path: string, options: { token?: string; body?: unknow
 
 export const api = {
   topics: (signal?: AbortSignal) => request<{ topics: Topic[] }>('/topics', { signal }),
-  create: (body: { topic_id: string; client_request_id: string }, token: string) => request<Snapshot>('/debates', { method: 'POST', body, token }),
+  create: (body: import('./types').TopicChoice & { client_request_id: string }, token: string) => request<Snapshot>('/debates', { method: 'POST', body, token }),
   snapshot: (id: string, token?: string, signal?: AbortSignal) => request<Snapshot>(`/debates/${encodeURIComponent(id)}`, { token, signal }),
   run: (id: string, token: string) => request<{ id: string; status: 'running' | 'judging' }>(`/debates/${encodeURIComponent(id)}/run`, { method: 'POST', token }),
   history: (cursor?: string, signal?: AbortSignal) => request<HistoryPage>(`/debates?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal }),

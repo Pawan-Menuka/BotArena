@@ -12,7 +12,7 @@ from app.engine.models import Agent, ROUND_NUMBER, TURN_ORDER, Side, Speech, Top
 from app.engine.orchestrator import run_debate, validate_checkpoint
 from app.engine.retry import OrchestratorError
 
-PROMPT_VERSION = "1"
+PROMPT_VERSION = "2"
 RUBRIC_VERSION = "1"
 
 

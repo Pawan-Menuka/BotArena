@@ -53,6 +53,8 @@ class Settings:
     def validate_execution_budget(self, model_id: str) -> None:
         from app.engine.budget import price_for
         price_for(model_id)
+        if model_id != "fake" and Path(str(self.database_path) + ".restore-pause").exists():
+            raise ValueError("Paid execution is paused until post-restore ledger reconciliation")
         if self.deployment_mode == "shared" and self.cost_cap_cents is None:
             raise ValueError("Shared execution requires MAX_RESERVED_COST_24H_USD")
         if model_id != "fake" and not self.input_accounting_confirmed:

@@ -10,7 +10,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 :focus-visible { outline: 3px solid var(--atlas); outline-offset: 5px; }
 main:focus { outline: none; }
 h1, h2, h3, h4, p { margin: 0; }
-h1, h2, h3 { line-height: 1.2; letter-spacing: -.035em; font-weight: 650; }
+h1, h2, h3 { line-height: 1.2; letter-spacing: -.035em; font-weight: 650; overflow-wrap: anywhere; }
 h2 { font-size: 1.65rem; } h3 { font-size: 1.2rem; } h4 { font-weight: 600; }
 p + p { margin-top: .8rem; }
 .shell { max-width: 1160px; margin: auto; padding: 0 32px; }
@@ -55,6 +55,13 @@ main.shell { min-height: 70vh; padding-top: 44px; padding-bottom: 64px; }
 .button.primary:hover { background: color-mix(in srgb, var(--violet) 85%, white); }
 .button.subtle { border-color: transparent; color: var(--muted); }
 .topic-card .button { margin-top: auto; width: 100%; }
+.custom-topic { margin-bottom: 36px; }
+.custom-topic h2 { margin: 8px 0 12px; }
+.custom-topic form { margin-top: 22px; }
+.custom-topic label { display: block; font-size: .85rem; font-weight: 650; margin-bottom: 8px; }
+.custom-topic input { width: 100%; min-height: 48px; border: 1px solid var(--line); border-radius: 9px; background: var(--background); color: var(--text); font: inherit; padding: 10px 14px; }
+.custom-topic input::placeholder { color: var(--muted); }
+.custom-topic-footer { display: flex; flex-wrap: wrap; gap: 8px 20px; justify-content: space-between; margin: 10px 0 18px; }
 .rules { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; margin-top: 52px; border-top: 1px solid var(--line); padding-top: 30px; }
 .rules h3 { font-size: .9rem; margin-bottom: 9px; letter-spacing: -.015em; }
 .rules p { font-size: .8rem; color: var(--muted); }

@@ -42,4 +42,18 @@ describe('pending creation', () => {
     await expect(recoverCreation(pending)).rejects.toThrow('browser storage')
     expect(pendingCreations()).toEqual([pending])
   })
+
+  it('replays exactly the saved custom topic after an uncertain response without starting work', async () => {
+    const entry = prepareCreation({ custom_topic: 'Public transport should be free.' })
+    const create = vi.spyOn(api, 'create').mockRejectedValueOnce(new Error('offline')).mockResolvedValue(snapshot())
+    const run = vi.spyOn(api, 'run')
+    await expect(recoverCreation(entry)).rejects.toThrow('offline')
+    const saved = pendingCreations()[0]
+    expect(saved.custom_topic).toBe('Public transport should be free.')
+    await recoverCreation(saved)
+    expect(create).toHaveBeenLastCalledWith({ custom_topic: saved.custom_topic, client_request_id: saved.client_request_id }, saved.token)
+    expect(run).not.toHaveBeenCalled()
+    expect(pendingCreations()).toEqual([])
+    expect(readToken('debate-1')).toBe(saved.token)
+  })
 })

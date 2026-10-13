@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import base64
 import json
+import hashlib
+import unicodedata
 from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
 from fastapi.encoders import jsonable_encoder
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import and_, or_, select, text
 from starlette.responses import JSONResponse
 
@@ -18,14 +20,38 @@ from app.core.quotas import check_creation
 from app.db.models import CreationQuotaRecord, Debate, DebateMessage, Judgment, utcnow
 from app.db.repo import load_speeches
 from app.engine.retry import OrchestratorError
+from app.engine.models import Topic
+from app.engine.screening import contains_profanity
 
 router = APIRouter(prefix="/api/debates")
 
 
 class CreateDebate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    topic_id: str = Field(strict=True, min_length=1, max_length=100)
+    topic_id: str | None = Field(default=None, strict=True, min_length=1, max_length=100)
+    custom_topic: str | None = Field(default=None, strict=True, min_length=10, max_length=200)
     client_request_id: UUID
+
+    @field_validator("custom_topic", mode="before")
+    @classmethod
+    def normalize_topic(cls, value):
+        if isinstance(value, str):
+            if len(value) > 1000 or any(unicodedata.category(char).startswith("C") for char in value):
+                raise ValueError("Topic must be plain text on one line")
+            return unicodedata.normalize("NFC", " ".join(value.split()))
+        return value
+
+    @model_validator(mode="after")
+    def one_topic(self):
+        if (self.topic_id is None) == (self.custom_topic is None):
+            raise ValueError("Choose a catalogue topic or supply a custom topic")
+        return self
+
+    @property
+    def requested_topic_id(self):
+        if self.custom_topic is None:
+            return self.topic_id
+        return "custom-" + hashlib.sha256(self.custom_topic.encode("utf-8")).hexdigest()
 
 
 def utc(value: datetime | None):
@@ -87,14 +113,22 @@ async def create_debate(body: CreateDebate, request: Request):
                 raise APIError(404, "not_found", "Battle not found.")
             if not verify_token(token, debate.execution_token_hash):
                 raise APIError(403, "forbidden", "Execution token required or invalid.")
-            if debate.topic_id != body.topic_id:
+            if (debate.topic_id != body.requested_topic_id
+                    or debate.topic_id.startswith("custom-") != (body.custom_topic is not None)):
                 raise APIError(409, "request_conflict", "Request ID was already used with different input.")
             status = 200
         else:
             hashed = token_hash(token)
             if hashed is None:
                 raise APIError(403, "forbidden", "Execution token required or invalid.")
-            topic = request.app.state.topics.get(body.topic_id)
+            if body.custom_topic is not None:
+                if contains_profanity(body.custom_topic):
+                    raise APIError(422, "invalid_custom_topic", "This topic was flagged by the basic profanity filter. Please rephrase it.")
+                topic = Topic(id=body.requested_topic_id, title=body.custom_topic,
+                              pro_framing="Argue in favor of the proposition in the topic.",
+                              con_framing="Argue against the proposition in the topic.")
+            else:
+                topic = request.app.state.topics.get(body.topic_id)
             if topic is None:
                 raise APIError(422, "invalid_topic", "Choose a topic from the catalogue.")
             now = utcnow()
