@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ai-replace-teachers",
+    "title": "Should AI tutors replace most classroom teaching for core subjects?",
+    "pro_framing": "AI tutors can give every student personalized, infinitely patient instruction at a fraction of the cost of human-led classrooms.",
+    "con_framing": "Teaching is fundamentally relational; replacing most human instruction with AI would damage motivation, social development, and accountability."
+  },
+  {
+    "id": "social-media-age-limits",
+    "title": "Should governments enforce a minimum age of 16 for social media accounts?",
+    "pro_framing": "Strong evidence links early social media use to mental health harm in adolescents; an enforced age limit protects a vulnerable group.",
+    "con_framing": "Age limits are unenforceable in practice, push teens toward less moderated spaces, and override parental judgment."
+  },
+  {
+    "id": "four-day-work-week",
+    "title": "Should a four-day work week become the standard for full-time employment?",
+    "pro_framing": "Trials consistently show maintained or improved productivity with better wellbeing; the standard week is an outdated default.",
+    "con_framing": "A shorter standard week raises costs and staffing complexity for many employers and doesn't suit every industry equally."
+  }
+]

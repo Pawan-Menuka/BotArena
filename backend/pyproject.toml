@@ -1,0 +1,34 @@
+[project]
+name = "botarena-backend"
+version = "0.1.0"
+description = "BotArena debate engine and API"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "alembic>=1.20.0",
+    "apscheduler>=3.11.3",
+    "better-profanity>=0.7.0",
+    "fastapi>=0.143.0",
+    "groq>=1.7.0",
+    "limits>=5.8.0",
+    "pydantic>=2.14.0",
+    "python-dotenv>=1.2.4",
+    "slowapi>=0.1.10",
+    "sqlalchemy[asyncio]>=2.1.4",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]
